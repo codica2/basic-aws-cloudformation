@@ -1,0 +1,442 @@
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+# CloudFormation Network Layer: VPC, Subnets + RouteTables, Internet + NAT Gateways, Security Group, Bastion Server, Application Load Balancer, ECR
+# Author: Vladislav Vosinsky
+#
+# Version      Date           Name                     Info
+# 2.0          24-May-2021    Vladislav Vosinsky       Initial Version
+#
+# ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+###########################
+##                       ##
+##     CloudFormation    ##
+##                       ##
+###########################
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Basic Setup: VPC, Subnets + RouteTables, Internet + NAT Gateways, Security Group, Bastion Server, Application Load Balancer, ECR"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "network Configuration"
+        Parameters:
+          - Environment
+          - VPCBlock
+      - Label:
+          default: "subnets CIDR Blocks"
+        Parameters:
+          - PublicSubnetACIDR
+          - PublicSubnetBCIDR
+          - PrivateSubnetACIDR
+          - PrivateSubnetBCIDR
+
+Parameters:
+  Environment:
+    Type: String
+    Default: "Network"
+
+  VPCBlock:
+    Type: String
+    Default: "10.0.0.0/16"
+
+  PublicSubnetACIDR:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: "public Subnet-A CIDR"
+
+  PublicSubnetBCIDR:
+    Type: String
+    Default: "10.0.3.0/24"
+    Description: "public Subnet-B CIDR"
+
+  PrivateSubnetACIDR:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: "private Subnet-A CIDR"
+
+  PrivateSubnetBCIDR:
+    Type: String
+    Default: "10.0.4.0/24"
+    Description: "public Subnet-B CIDR"
+
+Mappings:
+  UbuntuImage:
+    us-east-1:
+      AMI: ami-0bcc094591f354be2
+    us-east-2:
+      AMI: ami-0bbe28eb2173f6167
+    us-west-1:
+      AMI: ami-0dd005d3eb03f66e8
+    us-west-2:
+      AMI: ami-0a634ae95e11c6f91
+    ca-sentral-1:
+      AMI: ami-054798b3f62ca2a31
+    eu-west-1:
+      AMI: ami-07ee42ba0209b6d77
+    eu-central-1:
+      AMI: ami-04932daa2567651e7
+    eu-west-2:
+      AMI: ami-04edc9c2bfcf9a772
+    sa-east-1:
+      AMI: ami-08caf314e5abfbef4
+    ap-southeast-1:
+      AMI: ami-0007cf37783ff7e10
+    ap-southeast-2:
+      AMI: ami-0f87b0a4eff45d9ce
+    ap-northeast-1:
+      AMI: ami-01c36f3329957b16a
+
+Resources:
+  # ====== VPC ======
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties: # Attach Primary CIDR Block
+      CidrBlock: !Ref VPCBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}"
+
+  # ====== Internet Gateway =======
+  GatewayInternet:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: internetGateway
+
+  GatewayAttachmentInternet: # Attachment IGW to VPC
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref GatewayInternet
+
+  # ====== Public RouteTables ======
+  RouteTableForPublicSubnet: # Creation of Empty Route Table
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: publicRouteTable
+
+  RoutesForPublicRouteTable: # Creation and Attachment of Routes for Route Table
+    Type: "AWS::EC2::Route"
+    DependsOn: GatewayAttachmentInternet
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref GatewayInternet
+      RouteTableId: !Ref RouteTableForPublicSubnet
+
+  # ====== Private RouteTables ======
+  RouteTableForPrivateSubnet:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: privateRouteTable
+
+  # ====== Routes for Private Subnet RouteTables using NAT ======
+  RoutesForPrivateRouteTable:
+    Type: AWS::EC2::Route
+    DependsOn: NatGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref RouteTableForPrivateSubnet
+      NatGatewayId: !Ref NatGateway
+
+  # ====== Associate Public Route for Public Subnets ======
+  RouteAssociationPublicA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTableForPublicSubnet
+      SubnetId: !Ref PublicSubnetA
+
+  RouteAssociationPublicB:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTableForPublicSubnet
+      SubnetId: !Ref PublicSubnetB
+
+  # ===== Associate Private Route for Private Subnets ======
+
+  RouteAssociationPrivateA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTableForPrivateSubnet
+      SubnetId: !Ref PrivateSubnetA
+
+  RouteAssociationPrivateB:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTableForPrivateSubnet
+      SubnetId: !Ref PrivateSubnetB
+
+  # ====== ElasticIP for NAT Gateways ======
+
+  EIP1:
+    Type: "AWS::EC2::EIP"
+    DependsOn: GatewayAttachmentInternet
+    Properties:
+      Domain: !Ref VPC
+
+  # ====== NAT Gateway ======
+
+  NatGateway:
+    DependsOn: GatewayAttachmentInternet
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      AllocationId: !GetAtt EIP1.AllocationId
+      Tags:
+        - Key: Name
+          Value: natGateway
+
+  # ====== ALL Subnets ======
+
+  PublicSubnetA:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, "Fn::GetAZs": { Ref: "AWS::Region" }]
+      CidrBlock: !Ref "PublicSubnetACIDR"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-A
+
+  PublicSubnetB:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, "Fn::GetAZs": { Ref: "AWS::Region" }]
+      CidrBlock: !Ref "PublicSubnetBCIDR"
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-B
+
+  PrivateSubnetA:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, "Fn::GetAZs": { Ref: "AWS::Region" }]
+      CidrBlock: !Ref "PrivateSubnetACIDR"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: private-A
+
+  PrivateSubnetB:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, "Fn::GetAZs": { Ref: "AWS::Region" }]
+      CidrBlock: !Ref "PrivateSubnetBCIDR"
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: private-B
+
+  # ====== Security Group ======
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: bastion
+      GroupDescription: bastion-server
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 62.64.105.182/32
+        - IpProtocol: tcp
+          FromPort: "2376"
+          ToPort: "2376"
+          CidrIp: 0.0.0.0/0
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: load-balancer
+      GroupDescription: load-balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "443"
+          ToPort: "443"
+          CidrIp: 0.0.0.0/0
+
+  StagingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: staging
+      GroupDescription: staging
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 10.0.0.0/24
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "443"
+          ToPort: "443"
+          CidrIp: 0.0.0.0/0
+
+  # ====== EC2-Instance ======
+
+  BastionEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap
+        - UbuntuImage
+        - !Ref "AWS::Region"
+        - AMI
+      InstanceType: t3.nano
+      KeyName: !Sub "${AWS::StackName}-aws-key"
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !Ref PublicSubnetA
+          AssociatePublicIpAddress: true
+          GroupSet: [!Ref BastionSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeType: "io1"
+            Iops: "200"
+            DeleteOnTermination: "false"
+            VolumeSize: "20"
+        - DeviceName: "/dev/sdk"
+          NoDevice: {}
+      Tags:
+        - Key: Name
+          Value: "Bastion Server"
+
+  # ====== ECR ======
+
+  ECRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${AWS::StackName}
+
+  # ====== Application Load Balancer ======
+
+  StagingTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: staging
+      TargetType: ip
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: "/"
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200-499"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: stagingTargetGroup
+        - Key: Port
+          Value: 80
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: StagingTargetGroup
+      LoadBalancerArn:
+        Ref: ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}"
+      Scheme: internet-facing # or internal
+      Subnets:
+        - Ref: PublicSubnetA
+        - Ref: PublicSubnetB
+      SecurityGroups:
+        - Ref: ALBSecurityGroup
+
+# ====== OUTPUTS ======
+
+Outputs:
+  VPC:
+    Description: ID for the VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${AWS::StackName}"
+
+  VPCBlock1:
+    Description: primary CIDR block for the VPC
+    Value: !GetAtt VPC.CidrBlock
+    Export:
+      Name: cidrBlock
+
+  PublicA:
+    Description: ID for public Subnet A
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: publicSubnetA
+
+  PublicB:
+    Description: ID for public Subnet B
+    Value: !Ref PublicSubnetB
+    Export:
+      Name: publicSubnetB
+
+  PrivateA:
+    Description: ID for private Subnet A
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: privateSubnetA
+
+  PrivateB:
+    Description: ID for private Subnet B
+    Value: !Ref PrivateSubnetB
+    Export:
+      Name: privateSubnetB
+
+  BastionSecurityGroup:
+    Description: ID for bastion Security Group
+    Value: !Ref BastionSecurityGroup
+    Export:
+      Name: bastionSecurityGroup
+
+  BastionEC2Instance:
+    Description: ID for Bastion EC2 Instance
+    Value: !GetAtt "BastionEC2Instance.PublicIp"
+    Export:
+      Name: bastionEC2Instance
+
+  ECRepository:
+    Description: ID for EC Repository
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRepository}"
+    Export:
+      Name: elasticContainerRepository
+
+  ApplicationLoadBalancer:
+    Description: ID for application Load Balancer
+    Value: !GetAtt "ApplicationLoadBalancer.DNSName"
+    Export:
+      Name: applicationLoadBalancer
